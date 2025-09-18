@@ -29,7 +29,9 @@ const logger = winston.createLogger({
 
 // 导入交易模块
 const BinanceTrader = require('./src/binanceTrader');
+const OKXTrader = require('./src/okxTrader');
 const SignalValidator = require('./src/signalValidator');
+const OKXSignalValidator = require('./src/okxSignalValidator');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -43,7 +45,14 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // 初始化交易器
 const binanceTrader = new BinanceTrader();
+const okxTrader = new OKXTrader();
 const signalValidator = new SignalValidator();
+const okxSignalValidator = new OKXSignalValidator();
+
+// 选择交易器和验证器（基于环境变量）
+const isOKX = process.env.TRADING_EXCHANGE === 'okx';
+const selectedTrader = isOKX ? okxTrader : binanceTrader;
+const selectedValidator = isOKX ? okxSignalValidator : signalValidator;
 
 // TradingView Webhook验证中间件
 const verifyWebhook = (req, res, next) => {
@@ -99,7 +108,7 @@ app.post('/webhook/tradingview', verifyWebhook, async (req, res) => {
     logger.info('Received TradingView signal', { body: req.body });
 
     // 验证信号格式
-    const validationResult = signalValidator.validate(req.body);
+    const validationResult = selectedValidator.validate(req.body);
     if (validationResult.error) {
       logger.error('Signal validation failed', { error: validationResult.error.details });
       return res.status(400).json({ 
@@ -111,7 +120,7 @@ app.post('/webhook/tradingview', verifyWebhook, async (req, res) => {
     const signal = validationResult.value;
 
     // 处理交易信号
-    const result = await binanceTrader.processSignal(signal);
+    const result = await selectedTrader.processSignal(signal);
     
     logger.info('Signal processed successfully', { result });
     res.json({ 
@@ -133,7 +142,7 @@ app.post('/webhook/tradingview', verifyWebhook, async (req, res) => {
 // 获取当前持仓
 app.get('/api/positions', async (req, res) => {
   try {
-    const positions = await binanceTrader.getPositions();
+    const positions = await selectedTrader.getPositions();
     res.json(positions);
   } catch (error) {
     logger.error('Error fetching positions', { error: error.message });
@@ -144,7 +153,7 @@ app.get('/api/positions', async (req, res) => {
 // 获取账户余额
 app.get('/api/balance', async (req, res) => {
   try {
-    const balance = await binanceTrader.getBalance();
+    const balance = await selectedTrader.getBalance();
     res.json(balance);
   } catch (error) {
     logger.error('Error fetching balance', { error: error.message });
@@ -155,7 +164,7 @@ app.get('/api/balance', async (req, res) => {
 // 手动关闭所有订单
 app.post('/api/close-all', async (req, res) => {
   try {
-    const result = await binanceTrader.closeAllPositions();
+    const result = await selectedTrader.closeAllPositions();
     logger.info('All positions closed manually');
     res.json({ success: true, result });
   } catch (error) {
