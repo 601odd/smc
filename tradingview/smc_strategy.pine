@@ -1,0 +1,366 @@
+//@version=5
+strategy("SMC OKX Trading Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ==================== 输入参数 ====================
+// 风险管理参数
+risk_percent = input.float(1.0, "Risk per trade (%)", minval=0.1, maxval=10.0, step=0.1)
+position_size_percent = input.float(10.0, "Position size (%)", minval=1.0, maxval=100.0, step=1.0)
+leverage = input.int(10, "Leverage", minval=1, maxval=125, step=1)
+
+// SMC参数
+order_block_lookback = input.int(20, "Order Block Lookback Period", minval=5, maxval=100)
+fvg_lookback = input.int(10, "Fair Value Gap Lookback Period", minval=3, maxval=50)
+liquidity_sweep_threshold = input.float(0.5, "Liquidity Sweep Threshold (%)", minval=0.1, maxval=2.0, step=0.1)
+
+// 时间框架设置
+use_htf_orderblocks = input.bool(true, "Use Higher Timeframe Order Blocks")
+htf_timeframe = input.timeframe("4H", "Higher Timeframe for Order Blocks")
+
+// Webhook设置
+webhook_url = input.string("http://your-server-ip:3000/webhook/tradingview", "Webhook URL")
+send_signals = input.bool(true, "Send Trading Signals")
+
+// ==================== SMC核心函数 ====================
+
+// 检测订单区块 (Order Blocks)
+detectOrderBlock() =>
+    var float ob_high = na
+    var float ob_low = na
+    var bool is_bullish_ob = na
+    var int ob_time = na
+    
+    // 寻找强势突破后的回撤
+    strong_move = math.abs(close - close[5]) / close[5] > 0.02 // 2%以上的强势移动
+    
+    // 检测看涨订单区块
+    bullish_ob_condition = strong_move and close > open and close > close[5] and 
+                          low < low[1] and low < low[2] and low < low[3] and 
+                          close > (high + low) / 2
+    
+    // 检测看跌订单区块
+    bearish_ob_condition = strong_move and close < open and close < close[5] and 
+                          high > high[1] and high > high[2] and high > high[3] and 
+                          close < (high + low) / 2
+    
+    if bullish_ob_condition
+        ob_high := high
+        ob_low := low
+        is_bullish_ob := true
+        ob_time := bar_index
+    
+    if bearish_ob_condition
+        ob_high := high
+        ob_low := low
+        is_bullish_ob := false
+        ob_time := bar_index
+    
+    [ob_high, ob_low, is_bullish_ob, ob_time]
+
+// 检测公允价值缺口 (Fair Value Gap)
+detectFVG() =>
+    var float fvg_upper = na
+    var float fvg_lower = na
+    var bool is_bullish_fvg = na
+    var int fvg_time = na
+    
+    // 看涨FVG: 三根K线，中间K线的低点高于前后K线的高点
+    bullish_fvg = low[1] > high[2] and low[1] > high[0] and close[1] > open[1]
+    
+    // 看跌FVG: 三根K线，中间K线的高点低于前后K线的低点
+    bearish_fvg = high[1] < low[2] and high[1] < low[0] and close[1] < open[1]
+    
+    if bullish_fvg
+        fvg_upper := high[1]
+        fvg_lower := low[1]
+        is_bullish_fvg := true
+        fvg_time := bar_index
+    
+    if bearish_fvg
+        fvg_upper := high[1]
+        fvg_lower := low[1]
+        is_bullish_fvg := false
+        fvg_time := bar_index
+    
+    [fvg_upper, fvg_lower, is_bullish_fvg, fvg_time]
+
+// 检测流动性水平 (Liquidity Levels)
+detectLiquidityLevels() =>
+    var float buy_side_liquidity = na
+    var float sell_side_liquidity = na
+    
+    // 检测买盘流动性 (高点突破)
+    recent_high = ta.highest(high, order_block_lookback)
+    if high >= recent_high[1] and high > high[1] and high > high[2]
+        sell_side_liquidity := recent_high[1]
+    
+    // 检测卖盘流动性 (低点突破)
+    recent_low = ta.lowest(low, order_block_lookback)
+    if low <= recent_low[1] and low < low[1] and low < low[2]
+        buy_side_liquidity := recent_low[1]
+    
+    [buy_side_liquidity, sell_side_liquidity]
+
+// 检测市场结构 (Market Structure)
+detectMarketStructure() =>
+    var bool is_uptrend = na
+    var bool is_downtrend = na
+    
+    // 更高的高点和高低点 = 上升趋势
+    higher_high = high > ta.highest(high[1], 10)
+    higher_low = low > ta.lowest(low[1], 10)
+    
+    // 更低的高点和低点 = 下降趋势
+    lower_high = high < ta.highest(high[1], 10)
+    lower_low = low < ta.lowest(low[1], 10)
+    
+    if higher_high and higher_low
+        is_uptrend := true
+        is_downtrend := false
+    
+    if lower_high and lower_low
+        is_uptrend := false
+        is_downtrend := true
+    
+    [is_uptrend, is_downtrend]
+
+// ==================== 主要检测逻辑 ====================
+
+// 获取SMC组件
+[ob_high, ob_low, is_bullish_ob, ob_time] = detectOrderBlock()
+[fvg_upper, fvg_lower, is_bullish_fvg, fvg_time] = detectFVG()
+[buy_side_liquidity, sell_side_liquidity] = detectLiquidityLevels()
+[is_uptrend, is_downtrend] = detectMarketStructure()
+
+// 高级时间框架订单区块
+htf_ob_high = request.security(syminfo.tickerid, htf_timeframe, ob_high[0])
+htf_ob_low = request.security(syminfo.tickerid, htf_timeframe, ob_low[0])
+htf_is_bullish_ob = request.security(syminfo.tickerid, htf_timeframe, is_bullish_ob[0])
+
+// ==================== 交易信号生成 ====================
+
+// 看涨信号条件
+bullish_signal = false
+if send_signals
+    // 基本看涨条件
+    basic_bullish = is_uptrend and close > ta.sma(close, 20) and volume > ta.sma(volume, 20)
+    
+    // SMC看涨条件
+    smc_bullish = (
+        // 订单区块测试
+        (not na(ob_high) and close > ob_low and close < ob_high and is_bullish_ob) or
+        // 高级时间框架订单区块测试
+        (use_htf_orderblocks and not na(htf_ob_high) and close > htf_ob_low and close < htf_ob_high and htf_is_bullish_ob) or
+        // FVG测试
+        (not na(fvg_lower) and close > fvg_lower and close < fvg_upper and is_bullish_fvg) or
+        // 流动性测试
+        (not na(buy_side_liquidity) and low <= buy_side_liquidity * (1 - liquidity_sweep_threshold / 100))
+    )
+    
+    bullish_signal := basic_bullish and smc_bullish and strategy.position_size == 0
+
+// 看跌信号条件
+bearish_signal = false
+if send_signals
+    // 基本看跌条件
+    basic_bearish = is_downtrend and close < ta.sma(close, 20) and volume > ta.sma(volume, 20)
+    
+    // SMC看跌条件
+    smc_bearish = (
+        // 订单区块测试
+        (not na(ob_high) and close > ob_low and close < ob_high and not is_bullish_ob) or
+        // 高级时间框架订单区块测试
+        (use_htf_orderblocks and not na(htf_ob_high) and close > htf_ob_low and close < htf_ob_high and not htf_is_bullish_ob) or
+        // FVG测试
+        (not na(fvg_lower) and close > fvg_lower and close < fvg_upper and not is_bullish_fvg) or
+        // 流动性测试
+        (not na(sell_side_liquidity) and high >= sell_side_liquidity * (1 + liquidity_sweep_threshold / 100))
+    )
+    
+    bearish_signal := basic_bearish and smc_bearish and strategy.position_size == 0
+
+// 平仓信号条件
+close_signal = false
+if strategy.position_size > 0
+    // 多头平仓条件
+    close_signal := bearish_signal or close < ta.sma(close, 10)
+else if strategy.position_size < 0
+    // 空头平仓条件
+    close_signal := bullish_signal or close > ta.sma(close, 10)
+
+// ==================== 止损止盈计算 ====================
+
+// 动态止损计算
+var float stop_loss = na
+var float take_profit = na
+
+if bullish_signal
+    // 看涨止损止盈
+    atr = ta.atr(14)
+    stop_loss := close - (atr * 2)
+    take_profit := close + (atr * 3)
+
+if bearish_signal
+    // 看跌止损止盈
+    atr = ta.atr(14)
+    stop_loss := close + (atr * 2)
+    take_profit := close - (atr * 3)
+
+// ==================== 策略执行 ====================
+
+// 执行交易
+if bullish_signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=position_size_percent, comment="SMC Long Signal")
+    strategy.exit("Long Exit", "Long", stop=stop_loss, limit=take_profit)
+
+if bearish_signal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=position_size_percent, comment="SMC Short Signal")
+    strategy.exit("Short Exit", "Short", stop=stop_loss, limit=take_profit)
+
+if close_signal and strategy.position_size != 0
+    strategy.close_all(comment="SMC Close Signal")
+
+// ==================== Webhook信号发送 ====================
+
+// 发送看涨信号
+if bullish_signal and barstate.isconfirmed
+    signal_data = {
+        "symbol": syminfo.ticker,
+        "action": "buy",
+        "price": close,
+        "stopLoss": stop_loss,
+        "takeProfit": take_profit,
+        "positionSize": position_size_percent,
+        "positionSizeType": "percentage",
+        "leverage": leverage,
+        "riskPercent": risk_percent,
+        "orderType": "market",
+        "strategy": "SMC",
+        "timeframe": timeframe.period,
+        "message": "SMC Bullish Signal - Order Block/FVG/Liquidity",
+        "orderBlock": {
+            "type": "bullish",
+            "price": ob_low,
+            "timeframe": timeframe.period
+        },
+        "fairValueGap": {
+            "upper": fvg_upper,
+            "lower": fvg_lower,
+            "timeframe": timeframe.period
+        },
+        "liquidityLevel": {
+            "type": "buy_side",
+            "price": buy_side_liquidity,
+            "strength": "strong"
+        },
+        "timestamp": timenow
+    }
+    
+    if send_signals
+        alert(signal_data, alert.freq_once_per_bar)
+
+// 发送看跌信号
+if bearish_signal and barstate.isconfirmed
+    signal_data = {
+        "symbol": syminfo.ticker,
+        "action": "sell",
+        "price": close,
+        "stopLoss": stop_loss,
+        "takeProfit": take_profit,
+        "positionSize": position_size_percent,
+        "positionSizeType": "percentage",
+        "leverage": leverage,
+        "riskPercent": risk_percent,
+        "orderType": "market",
+        "strategy": "SMC",
+        "timeframe": timeframe.period,
+        "message": "SMC Bearish Signal - Order Block/FVG/Liquidity",
+        "orderBlock": {
+            "type": "bearish",
+            "price": ob_high,
+            "timeframe": timeframe.period
+        },
+        "fairValueGap": {
+            "upper": fvg_upper,
+            "lower": fvg_lower,
+            "timeframe": timeframe.period
+        },
+        "liquidityLevel": {
+            "type": "sell_side",
+            "price": sell_side_liquidity,
+            "strength": "strong"
+        },
+        "timestamp": timenow
+    }
+    
+    if send_signals
+        alert(signal_data, alert.freq_once_per_bar)
+
+// 发送平仓信号
+if close_signal and strategy.position_size != 0 and barstate.isconfirmed
+    signal_data = {
+        "symbol": syminfo.ticker,
+        "action": "close",
+        "price": close,
+        "strategy": "SMC",
+        "timeframe": timeframe.period,
+        "message": "SMC Close Signal - Trend Reversal",
+        "timestamp": timenow
+    }
+    
+    if send_signals
+        alert(signal_data, alert.freq_once_per_bar)
+
+// ==================== 图表可视化 ====================
+
+// 绘制订单区块
+plotshape(not na(ob_high) and is_bullish_ob, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Bullish Order Block")
+plotshape(not na(ob_high) and not is_bullish_ob, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Bearish Order Block")
+
+// 绘制FVG
+plotshape(not na(fvg_upper) and is_bullish_fvg, style=shape.rectangle, location=location.belowbar, color=color.new(color.green, 70), size=size.small, title="Bullish FVG")
+plotshape(not na(fvg_upper) and not is_bullish_fvg, style=shape.rectangle, location=location.abovebar, color=color.new(color.red, 70), size=size.small, title="Bearish FVG")
+
+// 绘制流动性水平
+hline(buy_side_liquidity, "Buy Side Liquidity", color=color.blue, linestyle=hline.style_dashed)
+hline(sell_side_liquidity, "Sell Side Liquidity", color=color.orange, linestyle=hline.style_dashed)
+
+// 绘制趋势线
+plot(ta.sma(close, 20), "SMA 20", color=color.yellow, linewidth=1)
+plot(ta.sma(close, 10), "SMA 10", color=color.purple, linewidth=1)
+
+// 背景颜色表示趋势
+bgcolor(is_uptrend ? color.new(color.green, 95) : is_downtrend ? color.new(color.red, 95) : na, title="Trend Background")
+
+// ==================== 信息面板 ====================
+
+// 创建信息表格
+var table info_table = table.new(position.top_right, 2, 8, bgcolor=color.white, border_width=1)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Strategy", text_color=color.black, bgcolor=color.gray)
+    table.cell(info_table, 1, 0, "SMC OKX", text_color=color.black)
+    
+    table.cell(info_table, 0, 1, "Risk %", text_color=color.black)
+    table.cell(info_table, 1, 1, str.tostring(risk_percent) + "%", text_color=color.black)
+    
+    table.cell(info_table, 0, 2, "Position %", text_color=color.black)
+    table.cell(info_table, 1, 2, str.tostring(position_size_percent) + "%", text_color=color.black)
+    
+    table.cell(info_table, 0, 3, "Leverage", text_color=color.black)
+    table.cell(info_table, 1, 3, str.tostring(leverage) + "x", text_color=color.black)
+    
+    table.cell(info_table, 0, 4, "Trend", text_color=color.black)
+    table.cell(info_table, 1, 4, is_uptrend ? "Bullish" : is_downtrend ? "Bearish" : "Sideways", 
+               text_color=is_uptrend ? color.green : is_downtrend ? color.red : color.gray)
+    
+    table.cell(info_table, 0, 5, "Position", text_color=color.black)
+    table.cell(info_table, 1, 5, strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "None", 
+               text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
+    
+    table.cell(info_table, 0, 6, "P&L", text_color=color.black)
+    table.cell(info_table, 1, 6, str.tostring(strategy.netprofit, "#.##"), 
+               text_color=strategy.netprofit > 0 ? color.green : color.red)
+    
+    table.cell(info_table, 0, 7, "Signals", text_color=color.black)
+    table.cell(info_table, 1, 7, send_signals ? "ON" : "OFF", 
+               text_color=send_signals ? color.green : color.red)

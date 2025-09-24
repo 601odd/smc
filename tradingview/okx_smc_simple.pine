@@ -1,0 +1,234 @@
+//@version=5
+strategy("OKX SMC Simple Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ==================== 输入参数 ====================
+// 风险管理
+risk_percent = input.float(2.0, "Risk per trade (%)", minval=0.5, maxval=10.0, step=0.1)
+leverage = input.int(10, "Leverage", minval=1, maxval=125, step=1)
+
+// SMC设置
+ob_strength = input.int(3, "Order Block Strength", minval=1, maxval=10)
+fvg_strength = input.int(2, "FVG Strength", minval=1, maxval=5)
+atr_multiplier = input.float(2.0, "ATR Multiplier for SL/TP", minval=1.0, maxval=5.0, step=0.1)
+
+// 信号过滤
+min_volume_ratio = input.float(1.5, "Minimum Volume Ratio", minval=1.0, maxval=5.0, step=0.1)
+trend_filter = input.bool(true, "Use Trend Filter")
+
+// Webhook设置
+webhook_enabled = input.bool(true, "Enable Webhook Signals")
+webhook_url = input.string("http://your-server-ip:3000/webhook/tradingview", "Webhook URL")
+
+// ==================== SMC核心检测 ====================
+
+// 检测订单区块 - 简化版本
+isOrderBlock() =>
+    // 强势移动后的回撤K线
+    strong_candle = math.abs(close - open) / open > 0.01 // 1%以上实体
+    
+    // 看涨订单区块：强势上涨后的回调
+    bullish_ob = strong_candle and close > open and 
+                 low < low[1] and low < low[2] and 
+                 close > (high + low) / 2
+    
+    // 看跌订单区块：强势下跌后的反弹
+    bearish_ob = strong_candle and close < open and 
+                 high > high[1] and high > high[2] and 
+                 close < (high + low) / 2
+    
+    [bullish_ob, bearish_ob]
+
+// 检测公允价值缺口 - 简化版本
+isFVG() =>
+    // 看涨FVG：中间K线低点高于前后K线高点
+    bullish_fvg = low[1] > high[2] and low[1] > high[0] and close[1] > open[1]
+    
+    // 看跌FVG：中间K线高点低于前后K线低点
+    bearish_fvg = high[1] < low[2] and high[1] < low[0] and close[1] < open[1]
+    
+    [bullish_fvg, bearish_fvg]
+
+// 检测流动性测试
+isLiquiditySweep() =>
+    // 检测高点突破后快速回落
+    high_sweep = high > ta.highest(high[1], 10) and close < open
+    
+    // 检测低点突破后快速反弹
+    low_sweep = low < ta.lowest(low[1], 10) and close > open
+    
+    [high_sweep, low_sweep]
+
+// 趋势判断
+isTrending() =>
+    ema_fast = ta.ema(close, 9)
+    ema_slow = ta.ema(close, 21)
+    
+    uptrend = ema_fast > ema_slow and close > ema_fast
+    downtrend = ema_fast < ema_slow and close < ema_fast
+    
+    [uptrend, downtrend]
+
+// ==================== 信号生成 ====================
+
+// 获取SMC组件
+[bullish_ob, bearish_ob] = isOrderBlock()
+[bullish_fvg, bearish_fvg] = isFVG()
+[high_sweep, low_sweep] = isLiquiditySweep()
+[uptrend, downtrend] = isTrending()
+
+// 成交量过滤
+volume_ok = volume > ta.sma(volume, 20) * min_volume_ratio
+
+// 看涨信号
+bullish_signal = false
+if webhook_enabled
+    smc_bullish = bullish_ob or bullish_fvg or low_sweep
+    trend_ok = not trend_filter or uptrend
+    bullish_signal := smc_bullish and trend_ok and volume_ok and strategy.position_size == 0
+
+// 看跌信号
+bearish_signal = false
+if webhook_enabled
+    smc_bearish = bearish_ob or bearish_fvg or high_sweep
+    trend_ok = not trend_filter or downtrend
+    bearish_signal := smc_bearish and trend_ok and volume_ok and strategy.position_size == 0
+
+// 平仓信号
+close_long = strategy.position_size > 0 and (bearish_signal or close < ta.ema(close, 9))
+close_short = strategy.position_size < 0 and (bullish_signal or close > ta.ema(close, 9))
+
+// ==================== 止损止盈 ====================
+atr = ta.atr(14)
+
+// 看涨止损止盈
+long_sl = close - (atr * atr_multiplier)
+long_tp = close + (atr * atr_multiplier * 1.5)
+
+// 看跌止损止盈
+short_sl = close + (atr * atr_multiplier)
+short_tp = close - (atr * atr_multiplier * 1.5)
+
+// ==================== 策略执行 ====================
+
+// 开仓
+if bullish_signal
+    strategy.entry("Long", strategy.long, comment="SMC Long")
+    strategy.exit("Long Exit", "Long", stop=long_sl, limit=long_tp)
+
+if bearish_signal
+    strategy.entry("Short", strategy.short, comment="SMC Short")
+    strategy.exit("Short Exit", "Short", stop=short_sl, limit=short_tp)
+
+// 平仓
+if close_long
+    strategy.close("Long", comment="Close Long")
+    
+if close_short
+    strategy.close("Short", comment="Close Short")
+
+// ==================== Webhook信号 ====================
+
+// 发送看涨信号
+if bullish_signal and barstate.isconfirmed and webhook_enabled
+    signal_data = {
+        "symbol": syminfo.ticker,
+        "action": "buy",
+        "price": close,
+        "stopLoss": long_sl,
+        "takeProfit": long_tp,
+        "positionSize": 10,
+        "positionSizeType": "percentage",
+        "leverage": leverage,
+        "riskPercent": risk_percent,
+        "orderType": "market",
+        "strategy": "OKX_SMC",
+        "timeframe": timeframe.period,
+        "message": "OKX SMC Bullish Signal",
+        "orderBlock": bullish_ob ? "bullish" : na,
+        "fairValueGap": bullish_fvg ? "bullish" : na,
+        "liquiditySweep": low_sweep ? "buy_side" : na,
+        "timestamp": timenow
+    }
+    alert(signal_data, alert.freq_once_per_bar)
+
+// 发送看跌信号
+if bearish_signal and barstate.isconfirmed and webhook_enabled
+    signal_data = {
+        "symbol": syminfo.ticker,
+        "action": "sell",
+        "price": close,
+        "stopLoss": short_sl,
+        "takeProfit": short_tp,
+        "positionSize": 10,
+        "positionSizeType": "percentage",
+        "leverage": leverage,
+        "riskPercent": risk_percent,
+        "orderType": "market",
+        "strategy": "OKX_SMC",
+        "timeframe": timeframe.period,
+        "message": "OKX SMC Bearish Signal",
+        "orderBlock": bearish_ob ? "bearish" : na,
+        "fairValueGap": bearish_fvg ? "bearish" : na,
+        "liquiditySweep": high_sweep ? "sell_side" : na,
+        "timestamp": timenow
+    }
+    alert(signal_data, alert.freq_once_per_bar)
+
+// 发送平仓信号
+if (close_long or close_short) and strategy.position_size != 0 and barstate.isconfirmed and webhook_enabled
+    signal_data = {
+        "symbol": syminfo.ticker,
+        "action": "close",
+        "price": close,
+        "strategy": "OKX_SMC",
+        "timeframe": timeframe.period,
+        "message": "OKX SMC Close Signal",
+        "timestamp": timenow
+    }
+    alert(signal_data, alert.freq_once_per_bar)
+
+// ==================== 可视化 ====================
+
+// 绘制SMC信号
+plotshape(bullish_signal, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.normal, title="Bullish Signal")
+plotshape(bearish_signal, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.normal, title="Bearish Signal")
+
+// 绘制订单区块
+bgcolor(bullish_ob ? color.new(color.green, 90) : bearish_ob ? color.new(color.red, 90) : na, title="Order Blocks")
+
+// 绘制FVG
+bgcolor(bullish_fvg ? color.new(color.blue, 95) : bearish_fvg ? color.new(color.orange, 95) : na, title="Fair Value Gaps")
+
+// 绘制趋势线
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+plot(ema9, "EMA 9", color=color.yellow, linewidth=2)
+plot(ema21, "EMA 21", color=color.blue, linewidth=2)
+
+// 背景颜色表示趋势
+bgcolor(uptrend ? color.new(color.green, 98) : downtrend ? color.new(color.red, 98) : na, title="Trend")
+
+// ==================== 信息面板 ====================
+var table info_table = table.new(position.top_left, 2, 6, bgcolor=color.white, border_width=1)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Strategy", text_color=color.black, bgcolor=color.gray)
+    table.cell(info_table, 1, 0, "OKX SMC", text_color=color.black)
+    
+    table.cell(info_table, 0, 1, "Risk", text_color=color.black)
+    table.cell(info_table, 1, 1, str.tostring(risk_percent) + "%", text_color=color.black)
+    
+    table.cell(info_table, 0, 2, "Leverage", text_color=color.black)
+    table.cell(info_table, 1, 2, str.tostring(leverage) + "x", text_color=color.black)
+    
+    table.cell(info_table, 0, 3, "Trend", text_color=color.black)
+    table.cell(info_table, 1, 3, uptrend ? "Bullish" : downtrend ? "Bearish" : "Sideways", 
+               text_color=uptrend ? color.green : downtrend ? color.red : color.gray)
+    
+    table.cell(info_table, 0, 4, "Position", text_color=color.black)
+    table.cell(info_table, 1, 4, strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "None", 
+               text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray)
+    
+    table.cell(info_table, 0, 5, "P&L", text_color=color.black)
+    table.cell(info_table, 1, 5, str.tostring(strategy.netprofit, "#.##"), 
+               text_color=strategy.netprofit > 0 ? color.green : color.red)

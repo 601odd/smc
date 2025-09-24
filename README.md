@@ -1,22 +1,24 @@
 # SMC 自动交易机器人
 
-基于 Smart Money Concept (SMC) 策略的自动化交易机器人，支持 TradingView 信号接收和 Binance 交易执行。
+基于 Smart Money Concept (SMC) 策略的自动化交易机器人，支持 TradingView 信号接收和多交易所交易执行（Binance & OKX）。
 
 ## 🚀 特性
 
 - **TradingView 信号接收**: 通过 Webhook 接收 TradingView 发送的交易信号
-- **Binance 自动交易**: 自动在 Binance 期货市场执行交易
+- **多交易所支持**: 支持 Binance 和 OKX 交易所
 - **SMC 策略支持**: 专为 Smart Money Concept 策略设计
+- **智能信号验证**: 针对不同交易所的信号验证器
 - **风险管理**: 内置多层风险控制机制
 - **实时监控**: 完整的订单跟踪和持仓管理
 - **错误处理**: 智能错误处理和告警系统
 - **日志记录**: 详细的交易日志和统计
+- **Pine Script策略**: 完整的TradingView策略代码
 
 ## 📋 系统要求
 
 - Node.js >= 14.0.0
 - npm 或 yarn
-- Binance 账户和 API 密钥
+- 交易所账户和 API 密钥（Binance 或 OKX）
 - TradingView Pro 账户（用于发送 Webhook）
 
 ## 🛠 安装
@@ -34,7 +36,7 @@ npm install
 
 3. **配置环境变量**
 ```bash
-cp env.example .env
+cp .env.example .env
 ```
 
 编辑 `.env` 文件，填入你的配置：
@@ -44,23 +46,34 @@ cp env.example .env
 PORT=3000
 NODE_ENV=production
 
+# 选择交易交易所 (binance 或 okx)
+TRADING_EXCHANGE=okx
+
 # Binance API 配置
 BINANCE_API_KEY=your_binance_api_key_here
 BINANCE_API_SECRET=your_binance_api_secret_here
-BINANCE_TESTNET=false  # 生产环境设为 false
+BINANCE_TESTNET=false
+
+# OKX API 配置
+OKX_API_KEY=your_okx_api_key_here
+OKX_SECRET_KEY=your_okx_secret_key_here
+OKX_PASSPHRASE=your_okx_passphrase_here
+OKX_TESTNET=false
 
 # TradingView Webhook 配置
-VERIFY_TRADINGVIEW_IP=false         # 是否验证TradingView官方IP
-TRADINGVIEW_CUSTOM_SECRET=your_custom_secret_here  # 可选的自定义密钥
+VERIFY_TRADINGVIEW_IP=false
+TRADINGVIEW_CUSTOM_SECRET=your_custom_secret_here
 
 # 风险管理配置
-MAX_RISK_PER_TRADE=1.0         # 单笔交易最大风险百分比 (%)
-MAX_DAILY_RISK=5.0             # 每日最大风险百分比 (%)
-MAX_OPEN_POSITIONS=3           # 最大同时持仓数量
-DEFAULT_LEVERAGE=10            # 默认杠杆倍数
+MAX_RISK_PER_TRADE=1.0
+MAX_DAILY_RISK=5.0
+MAX_OPEN_POSITIONS=3
+DEFAULT_LEVERAGE=10
 ```
 
-## 🔑 Binance API 配置
+## 🔑 交易所 API 配置
+
+### Binance API 配置
 
 1. **登录 Binance 账户**，进入 API 管理页面
 2. **创建新的 API 密钥**
@@ -68,11 +81,20 @@ DEFAULT_LEVERAGE=10            # 默认杠杆倍数
 4. **启用期货交易权限**
 5. **复制 API Key 和 Secret** 到 `.env` 文件
 
+### OKX API 配置
+
+1. **登录 OKX 账户**，进入 API 管理页面
+2. **创建新的 API 密钥**
+3. **设置权限**：读取 + 交易（不要启用提币）
+4. **设置 IP 白名单**（推荐）
+5. **复制 API Key、Secret Key 和 Passphrase** 到 `.env` 文件
+
 ⚠️ **安全提醒**:
 - 不要在代码中硬编码 API 密钥
 - 使用 IP 白名单限制访问
 - 定期轮换 API 密钥
 - 测试环境先使用 Testnet
+- OKX需要设置Passphrase，请妥善保管
 
 ## 📊 TradingView 配置
 
@@ -135,6 +157,20 @@ TradingView 发送的 JSON 格式：
 - `positionSize`: 仓位大小
 - `leverage`: 杠杆倍数
 - `riskPercent`: 风险百分比
+
+## 🧪 测试连接
+
+在启动服务之前，建议先测试交易所连接：
+
+### 测试 OKX 连接
+```bash
+npm run test:okx
+```
+
+### 测试 Binance 连接
+```bash
+npm run test:binance
+```
 
 ## 🚀 启动服务
 
@@ -285,8 +321,57 @@ MIT License - 详见 LICENSE 文件
 
 ---
 
+## ⚡ 快速开始
+
+### 1. 选择交易所并配置
+```bash
+# 复制环境配置文件
+cp .env.example .env
+
+# 编辑配置文件，选择交易所
+# TRADING_EXCHANGE=okx  # 或 binance
+```
+
+### 2. 测试连接
+```bash
+# 测试OKX连接
+npm run test:okx
+
+# 或测试Binance连接  
+npm run test:binance
+```
+
+### 3. 启动服务器
+```bash
+npm start
+```
+
+### 4. 配置TradingView
+1. 复制 `tradingview/okx_smc_simple.pine` 内容
+2. 在TradingView Pine编辑器中粘贴
+3. 添加到图表
+4. 设置Webhook URL: `http://your-server-ip:3000/webhook/tradingview`
+5. 配置告警
+
+### 5. 监控交易
+```bash
+# 查看日志
+tail -f logs/combined.log
+
+# 检查持仓
+curl http://localhost:3000/api/positions
+
+# 检查余额
+curl http://localhost:3000/api/balance
+```
+
 **⚡ 快速开始提示**: 
 1. 先在 Testnet 环境测试
 2. 小资金验证策略有效性
 3. 逐步增加仓位规模
-4. 持续监控和优化 
+4. 持续监控和优化
+
+## 📚 详细文档
+
+- [OKX设置指南](./OKX_SETUP_GUIDE.md) - 详细的OKX配置和SMC策略说明
+- [TradingView策略](./tradingview/) - Pine Script策略代码 
